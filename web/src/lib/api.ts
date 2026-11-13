@@ -14,6 +14,7 @@ import type {
   SecretView,
   Service,
   ServiceLink,
+  UpdateStatus,
 } from "../types";
 
 export class ApiError extends Error {
@@ -222,12 +223,28 @@ export const api = {
 
   systemDoctor: () => request<{ checks: DoctorCheck[] }>("/api/system/doctor"),
   systemInfo: () =>
-    request<{ panel_domain: string; public_origin: string; base_domain: string }>("/api/system/info"),
+    request<{ version: string; panel_domain: string; public_origin: string; base_domain: string }>(
+      "/api/system/info"
+    ),
   setPanelDomain: (panel_domain: string) =>
     request<{ panel_domain: string }>("/api/system/panel-domain", {
       method: "PUT",
       body: JSON.stringify({ panel_domain }),
     }),
+  systemUpdateStatus: () => request<UpdateStatus>("/api/system/update"),
+  setAutoUpdate: (enabled: boolean) =>
+    request<UpdateStatus>("/api/system/update/auto", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    }),
+  applySystemUpdate: () =>
+    request<{
+      previous_version: string;
+      new_version: string;
+      updated: boolean;
+      skipped_reason?: string;
+      restart_required: boolean;
+    }>("/api/system/update/apply", { method: "POST" }),
 };
 
 export function statusLabelKo(status: string): string {

@@ -1,14 +1,17 @@
 package api
 
 import (
+	"context"
 	"io"
 	"mime"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/gachon-star-want/simple-server-control/internal/doctor"
+	"github.com/gachon-star-want/simple-server-control/internal/updater"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -21,7 +24,19 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Timeout(60 * time.Second))
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		var active int64
+		if s.pipeline != nil {
+			active = s.pipeline.ActiveDeployments()
+		}
+		ver := ""
+		if s.cfg != nil {
+			ver = s.cfg.Version
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                 true,
+			"version":            ver,
+			"active_deployments": active,
+		})
 	})
 
 	r.Route("/api", func(r chi.Router) {
@@ -42,6 +57,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/system/doctor", s.handleSystemDoctor)
 			r.Get("/system/info", s.handleSystemInfo)
 			r.Put("/system/panel-domain", s.handleSetPanelDomain)
+			r.Get("/system/update", s.handleSystemUpdateStatus)
+			r.Post("/system/update/auto", s.handleSystemUpdateToggle)
+			r.Post("/system/update/apply", s.handleSystemUpdateApply)
 
 			// GitHub App setup & discovery
 			r.Get("/github/status", s.handleGitHubStatus)
@@ -112,11 +130,87 @@ func (s *Server) handleSystemDoctor(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	panelDomain, _, _ := s.store.GetSetting("panel_domain")
+	ver := ""
+	if s.cfg != nil {
+		ver = s.cfg.Version
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"version":       ver,
 		"panel_domain":  panelDomain,
 		"public_origin": s.detectPublicOrigin(r),
 		"base_domain":   s.cfg.BaseDomain,
 	})
+}
+
+func (s *Server) newUpdaterClient() *updater.Client {
+	ver, repo := "", ""
+	if s.cfg != nil {
+		ver = s.cfg.Version
+		repo = s.cfg.Repo
+	}
+	return updater.New(updater.Options{
+		Repo:           repo,
+		CurrentVersion: ver,
+		ActiveDeployFn: func(context.Context) (int64, error) {
+			if s.pipeline != nil {
+				if n := s.pipeline.ActiveDeployments(); n > 0 {
+					return n, nil
+				}
+			}
+			if s.store != nil {
+				n, err := s.store.CountActiveRecentDeployments(2 * time.Hour)
+				return int64(n), err
+			}
+			return 0, nil
+		},
+	})
+}
+
+func (s *Server) handleSystemUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.newUpdaterClient().Status(r.Context()))
+}
+
+func (s *Server) handleSystemUpdateToggle(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "요청 형식이 올바르지 않습니다.")
+		return
+	}
+	if req.Enabled {
+		binPath, _ := os.Executable()
+		dataDir, repo := "/var/lib/ssc", updater.DefaultRepo
+		if s.cfg != nil {
+			dataDir = s.cfg.DataDir
+			repo = s.cfg.Repo
+		}
+		if err := updater.EnableAutoUpdate(r.Context(), binPath, dataDir, repo); err != nil {
+			writeError(w, http.StatusBadRequest, "AUTO_UPDATE_ERROR", err.Error())
+			return
+		}
+	} else {
+		if err := updater.DisableAutoUpdate(r.Context()); err != nil {
+			writeError(w, http.StatusBadRequest, "AUTO_UPDATE_ERROR", err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, s.newUpdaterClient().Status(r.Context()))
+}
+
+func (s *Server) handleSystemUpdateApply(w http.ResponseWriter, r *http.Request) {
+	res, err := s.newUpdaterClient().ApplyUpgrade(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "UPGRADE_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+	if res.Updated && res.RestartRequired && updater.RunningUnderSystemd() && s.onUpgradeRestart != nil {
+		go func() {
+			time.Sleep(400 * time.Millisecond)
+			s.onUpgradeRestart()
+		}()
+	}
 }
 
 func (s *Server) handleSetPanelDomain(w http.ResponseWriter, r *http.Request) {

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gachon-star-want/simple-server-control/internal/build"
@@ -67,6 +68,8 @@ type Pipeline struct {
 
 	subMu       sync.Mutex
 	subscribers map[string][]chan LogEvent
+
+	activeCount atomic.Int64
 }
 
 // NewPipeline wires together storage, Docker, Caddy, GitHub, and build runner dependencies.
@@ -223,6 +226,11 @@ func (p *Pipeline) ProvisionDatabase(ctx context.Context, svc *db.Service) error
 	return err
 }
 
+// ActiveDeployments returns the number of currently queued or executing deployments.
+func (p *Pipeline) ActiveDeployments() int64 {
+	return p.activeCount.Load()
+}
+
 // StartAppDeployment creates a pending deployment record immediately and executes the 6-stage
 // zero-downtime rollout asynchronously, returning the deployment ID right away for live UI tracking.
 func (p *Pipeline) StartAppDeployment(serviceID, triggerType, commitSHA, commitMsg string) (*db.Deployment, error) {
@@ -246,7 +254,9 @@ func (p *Pipeline) StartAppDeployment(serviceID, triggerType, commitSHA, commitM
 	_, _ = p.store.DB().Exec(`UPDATE deployments SET log_path = ? WHERE id = ?`, logPath, dep.ID)
 	dep.LogPath = logPath
 
+	p.activeCount.Add(1)
 	go func() {
+		defer p.activeCount.Add(-1)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		defer cancel()
 		_ = p.executeDeployment(ctx, dep, svc)
@@ -271,6 +281,8 @@ func (p *Pipeline) ExecuteDeploymentSync(ctx context.Context, serviceID, trigger
 	_, _ = p.store.DB().Exec(`UPDATE deployments SET log_path = ? WHERE id = ?`, logPath, dep.ID)
 	dep.LogPath = logPath
 
+	p.activeCount.Add(1)
+	defer p.activeCount.Add(-1)
 	err = p.executeDeployment(ctx, dep, svc)
 	latest, _ := p.store.GetDeployment(dep.ID)
 	if latest != nil {

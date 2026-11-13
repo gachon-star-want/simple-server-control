@@ -10,6 +10,8 @@ import (
 
 // Config holds runtime paths and server configuration for simple-server-control.
 type Config struct {
+	Version        string
+	Repo           string
 	DataDir        string
 	ListenAddr     string
 	CaddyAdminURL  string
@@ -36,6 +38,8 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
+		Version:        "0.1.0-dev",
+		Repo:           envOr("SSC_REPO", "gachon-star-want/simple-server-control"),
 		DataDir:        dataDir,
 		ListenAddr:     envOr("SSC_LISTEN_ADDR", ":8080"),
 		CaddyAdminURL:  strings.TrimRight(envOr("SSC_CADDY_ADMIN_URL", "http://127.0.0.1:2019"), "/"),

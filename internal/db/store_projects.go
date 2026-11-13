@@ -918,6 +918,17 @@ func ensureUniqueSlugInScope(tx *sql.Tx, countQuery, scopeID, base string) (stri
 	}
 }
 
+// CountActiveRecentDeployments returns active deployments started within maxAge.
+func (s *Store) CountActiveRecentDeployments(maxAge time.Duration) (int, error) {
+	cutoff := time.Now().UTC().Add(-maxAge)
+	var n int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM deployments
+		WHERE status IN ('queued', 'running') AND finished_at IS NULL AND started_at >= ?
+	`, cutoff).Scan(&n)
+	return n, err
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

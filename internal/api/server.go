@@ -71,14 +71,20 @@ func (h *CanvasHub) Broadcast(evt CanvasEvent) {
 
 // Server bundles backend subsystems exposed over HTTP/WebSocket.
 type Server struct {
-	cfg      *config.Config
-	store    *db.Store
-	engine   docker.Engine
-	router   proxy.Router
-	pipeline *deploy.Pipeline
-	ghClient *github.Client
-	hub      *CanvasHub
-	uiFS     fs.FS
+	cfg              *config.Config
+	store            *db.Store
+	engine           docker.Engine
+	router           proxy.Router
+	pipeline         *deploy.Pipeline
+	ghClient         *github.Client
+	hub              *CanvasHub
+	uiFS             fs.FS
+	onUpgradeRestart func()
+}
+
+// SetRestartCallback registers an optional hook invoked shortly after an in-panel upgrade completes.
+func (s *Server) SetRestartCallback(fn func()) {
+	s.onUpgradeRestart = fn
 }
 
 // NewServer constructs an API server instance.

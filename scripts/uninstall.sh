@@ -13,9 +13,12 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   exit 1
 fi
 
-echo "[ssc] systemd 서비스 중지 및 제거 중..."
+echo "[ssc] systemd 서비스 및 자동 업데이트 타이머 중지/제거 중..."
+systemctl disable --now "${SERVICE_NAME}-update.timer" >/dev/null 2>&1 || true
 systemctl disable --now "${SERVICE_NAME}" >/dev/null 2>&1 || true
-rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+rm -f "/etc/systemd/system/${SERVICE_NAME}.service" \
+      "/etc/systemd/system/${SERVICE_NAME}-update.service" \
+      "/etc/systemd/system/${SERVICE_NAME}-update.timer"
 systemctl daemon-reload >/dev/null 2>&1 || true
 
 echo "[ssc] 바이너리 제거: ${INSTALL_BIN}"

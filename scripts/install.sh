@@ -199,6 +199,16 @@ systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}" >/dev/null
 systemctl restart "${SERVICE_NAME}"
 
+AUTO_UPDATE="${SSC_AUTO_UPDATE:-true}"
+AUTO_UPDATE_LABEL="비활성 (수동: sudo ssc auto-update on)"
+if [[ "${AUTO_UPDATE}" == "true" ]]; then
+  if SSC_DATA_DIR="${DATA_DIR}" SSC_REPO="${REPO}" "${INSTALL_BIN}" auto-update on >/dev/null 2>&1; then
+    AUTO_UPDATE_LABEL="활성 (매일 1회 자동 확인 · 해제: sudo ssc auto-update off)"
+  else
+    warn "자동 업데이트 타이머 등록을 건너뛰었습니다 (수동 등록: sudo ssc auto-update on)."
+  fi
+fi
+
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   log "활성화된 UFW 방화벽에 80, 443, 8080 포트를 허용합니다..."
   ufw allow 80/tcp >/dev/null || true
@@ -216,6 +226,7 @@ echo "---------------------------------------------------------------------"
 echo "  대시보드 접속 : http://${PUBLIC_IP}:8080"
 echo "  Setup Token   : ${SETUP_TOKEN}"
 echo "  데이터 경로   : ${DATA_DIR}"
+echo "  자동 업데이트 : ${AUTO_UPDATE_LABEL}"
 echo "  상태 진단 CLI : ssc doctor"
 echo "====================================================================="
 echo ""

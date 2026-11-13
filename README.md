@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/gachon-star-want/simple-server-cont
 2. 공식 Docker CE 설치 및 다중 프로젝트용 IP 대역 풀(`10.0.0.0/8`, `/etc/docker/daemon.json`) + 로그 로테이션 설정
 3. 저사양 VPS(RAM ≤ 2.5GB)에서 빌드 중 메모리 부족(OOM)을 막기 위한 2GB Swap 자동 생성
 4. Railpack / Git 설치 및 바이너리 SHA-256 무결성 검증
-5. `systemd` 서비스(`simple-server-control.service`) 등록 및 초기 1회용 `Setup Token` 발급
+5. `systemd` 서비스(`simple-server-control.service`), **매일 1회 자동 업데이트 타이머(`simple-server-control-update.timer`)** 등록 및 초기 1회용 `Setup Token` 발급
 
 설치 후 터미널에 출력되는 대시보드 주소(`http://<서버IP>:8080`)로 접속해 Setup Token과 관리자 계정을 등록하면 바로 사용할 수 있습니다.
 
@@ -56,6 +56,8 @@ curl -fsSL https://raw.githubusercontent.com/gachon-star-want/simple-server-cont
 
 ```bash
 ssc doctor                  # Ubuntu LTS, Docker, Caddy, Swap, 디스크 상태 한국어 진단
+ssc upgrade                 # GitHub 최신 릴리스 확인 및 SHA-256 검증 즉시 업데이트
+ssc auto-update status      # 매일 자동 업데이트 타이머 상태 확인 (on | off | now)
 ssc reset-password          # 관리자 비밀번호 분실 시 CLI로 즉시 초기화
 ssc version                 # 설치된 버전 확인
 ```

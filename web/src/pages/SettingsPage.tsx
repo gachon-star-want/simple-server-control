@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowUpCircle,
   CheckCircle2,
   GitBranch,
   Globe,
@@ -11,7 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { api } from "../lib/api";
-import type { DoctorCheck, GitHubApp } from "../types";
+import type { DoctorCheck, GitHubApp, UpdateStatus } from "../types";
 
 export function SettingsPage() {
   const [apps, setApps] = useState<GitHubApp[]>([]);
@@ -21,6 +22,8 @@ export function SettingsPage() {
   const [manifestData, setManifestData] = useState<{ action_url: string; manifest: string } | null>(null);
   const [panelDomain, setPanelDomain] = useState("");
   const [checks, setChecks] = useState<DoctorCheck[]>([]);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updating, setUpdating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -31,16 +34,18 @@ export function SettingsPage() {
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [ghRes, sysRes, docRes] = await Promise.all([
+      const [ghRes, sysRes, docRes, updRes] = await Promise.all([
         api.githubStatus(),
         api.systemInfo(),
         api.systemDoctor(),
+        api.systemUpdateStatus().catch(() => null),
       ]);
       setApps(ghRes.apps || []);
       setDetectedOrigin(ghRes.detected_origin || window.location.origin);
       setPublicOrigin((prev) => prev || ghRes.detected_origin || window.location.origin);
       setPanelDomain(sysRes.panel_domain || "");
       setChecks(docRes.checks || []);
+      if (updRes) setUpdateStatus(updRes);
     } catch (err: any) {
       setError(err.message || "설정 정보를 불러오지 못했습니다.");
     } finally {
@@ -85,6 +90,49 @@ export function SettingsPage() {
       setFeedback("대시보드 도메인 설정이 반영되었습니다.");
     } catch (err: any) {
       setError(err.message || "도메인 설정 저장 실패");
+    }
+  };
+
+  const handleToggleAutoUpdate = async () => {
+    if (!updateStatus) return;
+    setUpdating(true);
+    setError("");
+    setFeedback("");
+    try {
+      const next = await api.setAutoUpdate(!updateStatus.auto_update_enabled);
+      setUpdateStatus(next);
+      setFeedback(
+        next.auto_update_enabled
+          ? "자동 업데이트가 활성화되었습니다 (매일 1회 GitHub 최신 릴리스 자동 확인)."
+          : "자동 업데이트가 비활성화되었습니다."
+      );
+    } catch (err: any) {
+      setError(err.message || "자동 업데이트 설정 변경 실패");
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const handleApplyUpdate = async () => {
+    setUpdating(true);
+    setError("");
+    setFeedback("");
+    try {
+      const res = await api.applySystemUpdate();
+      if (!res.updated) {
+        setFeedback(res.skipped_reason || "이미 최신 버전입니다.");
+      } else {
+        setFeedback(
+          `${res.previous_version} → ${res.new_version} 업데이트가 완료되어 서버를 재시작합니다 (약 3초 후 자동 새로고침)...`
+        );
+        window.setTimeout(() => window.location.reload(), 3800);
+      }
+      const next = await api.systemUpdateStatus().catch(() => null);
+      if (next) setUpdateStatus(next);
+    } catch (err: any) {
+      setError(err.message || "업데이트 적용 실패");
+    } finally {
+      setUpdating(false);
     }
   };
 
@@ -233,6 +281,81 @@ export function SettingsPage() {
               저장 및 프록시 적용
             </button>
           </form>
+        </section>
+
+        {/* Auto-Update & Version Card */}
+        <section className="rounded-2xl border border-zinc-800 bg-[#13161E] p-6 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-base font-semibold text-white">
+              <ArrowUpCircle className="h-4 w-4 text-sky-400" />
+              <span>프로그램 버전 &amp; 자동 업데이트</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  setUpdating(true);
+                  const next = await api.systemUpdateStatus().catch(() => null);
+                  if (next) setUpdateStatus(next);
+                  setUpdating(false);
+                }}
+                disabled={updating}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-800 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${updating ? "animate-spin" : ""}`} />
+                <span>버전 확인</span>
+              </button>
+              {updateStatus?.update_available && (
+                <button
+                  onClick={handleApplyUpdate}
+                  disabled={updating}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+                >
+                  {updating && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{updateStatus.latest_version} 지금 업데이트</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-zinc-800 bg-[#0D1017] px-4 py-3 text-xs space-y-1">
+              <div className="text-zinc-400">설치된 버전 / 최신 릴리스</div>
+              <div className="font-mono text-sm font-semibold text-zinc-100">
+                {updateStatus?.current_version || "-"}
+                <span className="mx-2 text-zinc-600">/</span>
+                <span className={updateStatus?.update_available ? "text-sky-400" : "text-emerald-400"}>
+                  {updateStatus?.latest_version || (updateStatus?.check_error ? "확인 실패" : "-")}
+                </span>
+              </div>
+              {updateStatus?.check_error && (
+                <div className="text-[11px] text-amber-300">{updateStatus.check_error}</div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between rounded-xl border border-zinc-800 bg-[#0D1017] px-4 py-3 text-xs">
+              <div className="space-y-0.5 pr-3">
+                <div className="font-semibold text-zinc-100">매일 자동 업데이트</div>
+                <div className="text-[11px] text-zinc-400">
+                  {!updateStatus?.systemd_available
+                    ? "Ubuntu systemd 환경에서 자동 활성화됩니다."
+                    : updateStatus.auto_update_enabled
+                    ? `활성화됨 (매일 1회 무중단 확인${updateStatus.auto_update_next_run ? ` · 다음: ${updateStatus.auto_update_next_run}` : ""})`
+                    : "비활성 상태"}
+                </div>
+              </div>
+              <button
+                onClick={handleToggleAutoUpdate}
+                disabled={updating || !updateStatus?.systemd_available}
+                className={`shrink-0 rounded-xl px-3.5 py-2 text-xs font-semibold transition disabled:opacity-40 ${
+                  updateStatus?.auto_update_enabled
+                    ? "border border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                    : "bg-zinc-800 text-zinc-200 hover:bg-zinc-700"
+                }`}
+              >
+                {updateStatus?.auto_update_enabled ? "자동 켜짐" : "켜기"}
+              </button>
+            </div>
+          </div>
         </section>
 
         {/* Ubuntu LTS / Docker / Caddy Doctor Card */}

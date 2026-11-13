@@ -175,3 +175,16 @@ export interface ContainerStats {
   net_tx_bytes: number;
   pids: number;
 }
+
+export interface UpdateStatus {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  is_dev_build: boolean;
+  auto_update_enabled: boolean;
+  auto_update_next_run?: string;
+  systemd_managed: boolean;
+  systemd_available: boolean;
+  repo: string;
+  check_error?: string;
+}
