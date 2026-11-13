@@ -99,9 +99,22 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGitHubInstall(w http.ResponseWriter, r *http.Request) {
-	if state := r.URL.Query().Get("state"); state != "" {
-		if err := s.ghClient.ConsumeState(state, "install"); err != nil {
-			http.Redirect(w, r, "/settings?github_error="+urlQueryEscape(err.Error()), http.StatusFound)
+	if states := r.URL.Query()["state"]; len(states) > 0 {
+		var lastErr error
+		matched := false
+		for _, candidate := range states {
+			if candidate == "" {
+				continue
+			}
+			if err := s.ghClient.ConsumeState(candidate, "install"); err == nil {
+				matched = true
+				break
+			} else {
+				lastErr = err
+			}
+		}
+		if lastErr != nil && !matched {
+			http.Redirect(w, r, "/settings?github_error="+urlQueryEscape(lastErr.Error()), http.StatusFound)
 			return
 		}
 	}

@@ -117,10 +117,10 @@ func BuildManifest(appName, publicOrigin, state string) (string, error) {
 		appName = "ssc-deploy-" + state[:6]
 	}
 	manifest := map[string]any{
-		"name":        appName,
-		"url":         origin,
-		"redirect_url": fmt.Sprintf("%s/api/github/callback?state=%s", origin, state),
-		"setup_url":    fmt.Sprintf("%s/api/github/install?state=%s", origin, state),
+		"name":            appName,
+		"url":             origin,
+		"redirect_url":    origin + "/api/github/callback",
+		"setup_url":       origin + "/api/github/install",
 		"setup_on_update": true,
 		"public":      false,
 		"hook_attributes": map[string]any{

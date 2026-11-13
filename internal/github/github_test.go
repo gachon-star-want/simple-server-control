@@ -98,7 +98,7 @@ func TestManifestExchangeInstallationVerifyAndRepos(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestJSON, err := github.BuildManifest("my-ssc", "https://ssc.example.com", state)
-	if err != nil || !strings.Contains(manifestJSON, "/api/webhooks/github") {
+	if err != nil || !strings.Contains(manifestJSON, "/api/webhooks/github") || strings.Contains(manifestJSON, "install?state=") {
 		t.Fatalf("unexpected manifest: %s err=%v", manifestJSON, err)
 	}
 	if err := client.ConsumeState(state, "manifest"); err != nil {
