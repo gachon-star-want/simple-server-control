@@ -196,7 +196,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "${SERVICE_NAME}"
+systemctl enable "${SERVICE_NAME}" >/dev/null
+systemctl restart "${SERVICE_NAME}"
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   log "활성화된 UFW 방화벽에 80, 443, 8080 포트를 허용합니다..."
