@@ -1,0 +1,21 @@
+[Unit]
+Description=Simple Server Control (ssc) - Lightweight Korean Self-Hosted PaaS
+Documentation=https://github.com/gachon-star-want/simple-server-control
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ssc serve
+Environment=SSC_DATA_DIR=/var/lib/ssc
+Environment=SSC_LISTEN_ADDR=:8080
+WorkingDirectory=/var/lib/ssc
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+LimitNOFILE=65536
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

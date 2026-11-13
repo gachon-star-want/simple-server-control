@@ -1,0 +1,10 @@
+dist/
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+*.db
+*.db-wal
+*.db-shm
+*.log
+.DS_Store
+.env

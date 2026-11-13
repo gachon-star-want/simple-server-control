@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build UI & Static Linux Release Binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          cd web
+          npm ci
+          npm run build
+          cd ..
+          make release-binaries VERSION="${VERSION}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/simple-server-control-linux-amd64
+            dist/simple-server-control-linux-arm64
+            dist/checksums.txt
