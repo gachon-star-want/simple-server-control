@@ -32,6 +32,7 @@ export function AddServiceModal({
   const [buildPack, setBuildPack] = useState("auto");
   const [port, setPort] = useState("3000");
   const [healthPath, setHealthPath] = useState("/");
+  const [dataPath, setDataPath] = useState("");
   const [autoDeploy, setAutoDeploy] = useState(true);
   const [autoDomain, setAutoDomain] = useState(true);
   const [deployNow, setDeployNow] = useState(true);
@@ -98,6 +99,7 @@ export function AddServiceModal({
         build_pack: kind === "app" ? buildPack : undefined,
         port: kind === "app" ? Number(port) || 3000 : undefined,
         healthcheck_path: kind === "app" ? healthPath.trim() || "/" : undefined,
+        data_path: kind === "app" ? dataPath.trim() : undefined,
         auto_deploy: kind === "app" ? autoDeploy : false,
         auto_domain: kind === "app" ? autoDomain : false,
         deploy_now: kind === "app" ? deployNow && Boolean(repoFullName.trim()) : false,
@@ -281,6 +283,19 @@ export function AddServiceModal({
                     <option value="dockerfile">Dockerfile</option>
                   </select>
                 </div>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-zinc-300">보관 폴더 (선택)</label>
+                <input
+                  value={dataPath}
+                  onChange={(e) => setDataPath(e.target.value)}
+                  placeholder="예: /data — SQLite·업로드 파일처럼 배포 후에도 남아야 하는 폴더"
+                  className="w-full rounded-xl border border-zinc-800 bg-[#0D1017] px-3.5 py-2 text-sm text-zinc-100"
+                />
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  지정하면 이 폴더가 디스크에 보관되어 다시 배포해도 남습니다. 대신 배포할 때 잠깐(수 초) 접속이 끊깁니다.
+                </p>
               </div>
 
               <div>

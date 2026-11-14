@@ -120,6 +120,7 @@ export const api = {
       build_pack?: string;
       port?: number;
       healthcheck_path?: string;
+      data_path?: string;
       auto_deploy?: boolean;
       auto_domain?: boolean;
       deploy_now?: boolean;

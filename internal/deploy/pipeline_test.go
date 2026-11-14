@@ -24,6 +24,7 @@ type fakeEngine struct {
 	started    []docker.ContainerSpec
 	removedIDs []string
 	stoppedIDs []string
+	ops        []string // ordered "start:<image>" / "stop:<id>" log
 }
 
 func (f *fakeEngine) Ping(context.Context) error                    { return nil }
@@ -37,6 +38,7 @@ func (f *fakeEngine) StartContainer(_ context.Context, spec docker.ContainerSpec
 	f.seq++
 	id := fmt.Sprintf("cid-%d", f.seq)
 	f.started = append(f.started, spec)
+	f.ops = append(f.ops, "start:"+spec.Image)
 	return &docker.ContainerInfo{
 		ID:          id,
 		Name:        spec.Name,
@@ -50,6 +52,7 @@ func (f *fakeEngine) StopContainer(_ context.Context, id string, _ time.Duration
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stoppedIDs = append(f.stoppedIDs, id)
+	f.ops = append(f.ops, "stop:"+id)
 	return nil
 }
 func (f *fakeEngine) RemoveContainer(_ context.Context, id string) error {
@@ -205,5 +208,84 @@ func TestZeroDowntimeSwapAndFailurePreservesOldContainer(t *testing.T) {
 	}
 	if rtr.syncs < 2 {
 		t.Fatalf("expected caddy syncs on successful deployments, got %d", rtr.syncs)
+	}
+}
+
+func TestDataFolderMountsVolumeAndStopsOldFirst(t *testing.T) {
+	vault, _ := crypto.NewVaultFromKey(bytes.Repeat([]byte{0x56}, 32))
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "deploy.db"), vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	proj, env, _ := store.CreateProject("Mulgyeol", "")
+	appSvc, err := store.CreateService(db.CreateServiceInput{
+		ProjectID: proj.ID, EnvironmentID: env.ID, Name: "game", Kind: "app",
+		Port: 2567, RepoFullName: "x/mulgyeol", HealthcheckTimeout: 1, DataPath: "/data/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appSvc.DataPath != "/data" || appSvc.VolumeName != "ssc-vol-mulgyeol-game" {
+		t.Fatalf("data path/volume not normalized: %q %q", appSvc.DataPath, appSvc.VolumeName)
+	}
+	if _, err := store.CreateService(db.CreateServiceInput{ProjectID: proj.ID, EnvironmentID: env.ID, Name: "bad", Kind: "app", DataPath: "data"}); err == nil {
+		t.Fatal("relative data path must be rejected")
+	}
+
+	eng := &fakeEngine{}
+	bldr := &fakeBuilder{tag: "img:v1"}
+	pipe := deploy.NewPipeline(store, eng, &fakeRouter{}, bldr, nil, filepath.Join(tmp, "logs"), "ssc-ingress", nil)
+	pipe.SetTimings(time.Millisecond, time.Millisecond)
+	// The container being probed is always the most recently started one.
+	pipe.SetProbeFunc(func(context.Context, string, string) error {
+		eng.mu.Lock()
+		img := eng.started[len(eng.started)-1].Image
+		eng.mu.Unlock()
+		if img == "img:broken" {
+			return fmt.Errorf("healthcheck_404: /health returned 404")
+		}
+		return nil
+	})
+	deployOK := func(tag string) {
+		t.Helper()
+		bldr.tag = tag
+		if dep, err := pipe.ExecuteDeploymentSync(context.Background(), appSvc.ID, "manual", "", ""); err != nil || dep.Status != "succeeded" {
+			t.Fatalf("deploy %s failed: %+v %v", tag, dep, err)
+		}
+	}
+
+	// 1. First deploy mounts the named volume at /data.
+	deployOK("img:v1")
+	m := eng.started[0].Mounts
+	if len(m) != 1 || m[0].Type != "volume" || m[0].Source != "ssc-vol-mulgyeol-game" || m[0].Target != "/data" {
+		t.Fatalf("app container missing data volume: %+v", m)
+	}
+
+	// 2. Redeploy stops the old container BEFORE the new one starts.
+	eng.ops = nil
+	deployOK("img:v2")
+	if !slices.Equal(eng.ops[:2], []string{"stop:cid-1", "start:img:v2"}) {
+		t.Fatalf("expected stop-then-start, got %v", eng.ops)
+	}
+
+	// 3. A broken release is rolled back to the previous image, on the same volume.
+	bldr.tag = "img:broken"
+	dep, err := pipe.ExecuteDeploymentSync(context.Background(), appSvc.ID, "manual", "", "")
+	if err == nil || dep.Status != "failed" {
+		t.Fatalf("broken deploy should fail: %+v", dep)
+	}
+	last := eng.started[len(eng.started)-1]
+	if last.Image != "img:v2" || len(last.Mounts) != 1 {
+		t.Fatalf("expected restore from img:v2 with volume, got %+v", last)
+	}
+	cur, _ := store.GetService(appSvc.ID)
+	if cur.Status != "running" || cur.ActiveImage != "img:v2" || cur.ActiveContainerID != "cid-4" {
+		t.Fatalf("service not restored: %+v", cur)
+	}
+	if !slices.Contains(eng.removedIDs, "cid-2") || !slices.Contains(eng.removedIDs, "cid-3") {
+		t.Fatalf("old stopped container and broken candidate should be removed: %v", eng.removedIDs)
 	}
 }

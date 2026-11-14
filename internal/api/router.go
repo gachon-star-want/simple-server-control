@@ -19,7 +19,6 @@ import (
 // Router returns the complete HTTP handler wiring REST API, WebSockets, webhooks, and SPA UI.
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
@@ -125,6 +124,8 @@ func (s *Server) Router() http.Handler {
 
 func (s *Server) handleSystemDoctor(w http.ResponseWriter, r *http.Request) {
 	results := doctor.RunAll(r.Context(), s.engine, s.cfg.DataDir, s.cfg.CaddyAdminURL)
+	results = append(results, doctor.CheckPanelExposure(s.cfg.ListenAddr))
+	results = append(results, doctor.CheckDomains(r.Context(), s.store.ListPublicHostnames())...)
 	writeJSON(w, http.StatusOK, map[string]any{"checks": results})
 }
 

@@ -313,6 +313,8 @@ func (p *Pipeline) executeDeployment(ctx context.Context, dep *db.Deployment, sv
 
 	oldContainerID := svc.ActiveContainerID
 	hadRunningOld := svc.Status == "running" && oldContainerID != ""
+	stopFirst := svc.DataPath != "" && oldContainerID != ""
+	oldStopped := false // true once a previously serving container was stopped and must be restored on failure
 
 	var ghApp *db.GitHubApp
 	var installToken string
@@ -334,6 +336,15 @@ func (p *Pipeline) executeDeployment(ctx context.Context, dep *db.Deployment, sv
 		nextStatus := "failed"
 		if hadRunningOld {
 			nextStatus = "running"
+		}
+		if oldStopped {
+			logger.Writef("[rollback] 이전 이미지(%s)로 서비스를 다시 띄웁니다...\n", svc.ActiveImage)
+			if rerr := p.restorePrevious(ctx, proj, svc, dep.ID); rerr != nil {
+				logger.Writef("[rollback] 이전 이미지 복구 실패: %v\n", rerr)
+				nextStatus = "failed"
+			} else {
+				logger.Writef("[rollback] 이전 버전으로 복구 완료\n")
+			}
 		}
 		_, _ = p.store.UpdateServiceRuntimeStatus(svc.ID, nextStatus, "", "", "", time.Now().UnixNano(), false)
 		p.notifyCanvas(svc.ProjectID, svc.EnvironmentID, svc.ID, nextStatus)
@@ -385,8 +396,18 @@ func (p *Pipeline) executeDeployment(ctx context.Context, dep *db.Deployment, sv
 		_, _ = p.store.DB().Exec(`UPDATE deployments SET commit_sha = ?, commit_message = ? WHERE id = ?`, buildRes.CommitSHA, buildRes.CommitMessage, dep.ID)
 	}
 
-	// Stage 3: Start candidate container without stopping the live old container.
+	// Stage 3: Start candidate. Stateless apps keep the old container serving (zero downtime);
+	// apps with a data folder stop the old one first so two containers never write the same files.
 	p.setStage(dep, StageStartingNew, buildRes.ImageTag, "")
+	if stopFirst {
+		logger.Writef("==> [3/6] 보관 폴더(%s)가 있어 기존 컨테이너를 먼저 멈춥니다 (멈추고 바꾸기, 잠시 접속이 끊깁니다)\n", svc.DataPath)
+		if err := p.stopForReplace(ctx, oldContainerID); err != nil {
+			return fail(StageStartingNew, fmt.Errorf("기존 컨테이너 중지 실패: %w", err))
+		}
+		oldStopped = hadRunningOld
+		_, _ = p.store.UpdateServiceRuntimeStatus(svc.ID, "deploying", "", "", "", time.Now().UnixNano(), false)
+		p.notifyCanvas(svc.ProjectID, svc.EnvironmentID, svc.ID, "deploying")
+	}
 	logger.Writef("==> [3/6] 새 컨테이너(%s) 기동 중...\n", buildRes.ImageTag)
 
 	envMap, err := p.store.ResolveServiceRuntimeEnv(svc.ID)
@@ -403,22 +424,7 @@ func (p *Pipeline) executeDeployment(ctx context.Context, dep *db.Deployment, sv
 	}
 	candidateName := fmt.Sprintf("ssc-%s-%s-%s", proj.Slug, svc.Slug, shortID)
 
-	candidateInfo, err := p.engine.StartContainer(ctx, docker.ContainerSpec{
-		Name:           candidateName,
-		Image:          buildRes.ImageTag,
-		Env:            formatDockerEnv(envMap),
-		ProjectNetwork: proj.NetworkName,
-		NetworkAliases: []string{svc.Slug},
-		AttachIngress:  true,
-		IngressNetwork: p.ingressNetwork,
-		RestartPolicy:  "unless-stopped",
-		Labels: map[string]string{
-			docker.LabelProjectID: proj.ID,
-			docker.LabelEnvID:     svc.EnvironmentID,
-			docker.LabelServiceID: svc.ID,
-			docker.LabelKind:      "app",
-		},
-	})
+	candidateInfo, err := p.engine.StartContainer(ctx, p.appContainerSpec(proj, svc, candidateName, buildRes.ImageTag, formatDockerEnv(envMap)))
 	if err != nil {
 		return fail(StageStartingNew, err)
 	}
@@ -457,9 +463,11 @@ func (p *Pipeline) executeDeployment(ctx context.Context, dep *db.Deployment, sv
 	p.setStage(dep, StageDrainingOld, buildRes.ImageTag, candidateInfo.ID)
 	if oldContainerID != "" && oldContainerID != candidateInfo.ID {
 		logger.Writef("==> [6/6] 기존 컨테이너 연결 종료 대기(draining) 후 정리 중...\n")
-		select {
-		case <-ctx.Done():
-		case <-time.After(p.drainDelay):
+		if !stopFirst {
+			select {
+			case <-ctx.Done():
+			case <-time.After(p.drainDelay):
+			}
 		}
 		_ = p.engine.StopContainer(ctx, oldContainerID, 10*time.Second)
 		_ = p.engine.RemoveContainer(ctx, oldContainerID)
@@ -469,7 +477,11 @@ func (p *Pipeline) executeDeployment(ctx context.Context, dep *db.Deployment, sv
 
 	_ = p.store.CompleteDeployment(dep.ID, buildRes.ImageTag, candidateInfo.ID)
 	p.notifyCanvas(svc.ProjectID, svc.EnvironmentID, svc.ID, "running")
-	p.reportGitHubStatus(ctx, ghApp, svc, dep.CommitSHA, "success", "무중단 배포가 완료되었습니다.")
+	doneMsg := "무중단 배포가 완료되었습니다."
+	if stopFirst {
+		doneMsg = "배포가 완료되었습니다 (멈추고 바꾸기)."
+	}
+	p.reportGitHubStatus(ctx, ghApp, svc, dep.CommitSHA, "success", doneMsg)
 	p.broadcast(LogEvent{
 		DeploymentID: dep.ID,
 		ServiceID:    svc.ID,
@@ -608,6 +620,8 @@ func (p *Pipeline) RestartService(ctx context.Context, serviceID string) error {
 	if svc.ActiveContainerID != "" {
 		_ = p.engine.StopContainer(ctx, svc.ActiveContainerID, 10*time.Second)
 		_ = p.engine.RemoveContainer(ctx, svc.ActiveContainerID)
+		svc.ActiveContainerID = "" // already removed; relaunch must not try to stop or restore it
+		svc.Status = "stopped"
 	}
 
 	proj, err := p.store.GetProject(svc.ProjectID)
@@ -667,12 +681,68 @@ func (p *Pipeline) relaunchImage(ctx context.Context, proj *db.Project, svc *db.
 	shortID := dep.ID[:8]
 	candidateName := fmt.Sprintf("ssc-%s-%s-%s", proj.Slug, svc.Slug, shortID)
 	p.setStage(dep, StageStartingNew, imageTag, "")
+
+	// Same rule as deploys: a data folder means the old container must stop before the new one starts.
+	stopFirst := svc.DataPath != "" && oldContainerID != ""
+	oldStopped := false
+	if stopFirst {
+		logger.Writef("==> [복원] 보관 폴더(%s)가 있어 기존 컨테이너를 먼저 멈춥니다...\n", svc.DataPath)
+		if err := p.stopForReplace(ctx, oldContainerID); err != nil {
+			diag := DiagnoseFailure(StageStartingNew, err, logger.Tail())
+			_ = p.store.FailDeployment(dep.ID, StageStartingNew, diag.Code, diag.TitleKo, diag.DetailKo)
+			return err
+		}
+		oldStopped = svc.Status == "running"
+	}
+	failRelaunch := func(stage string, cause error) error {
+		if oldStopped {
+			logger.Writef("[rollback] 이전 이미지(%s)로 서비스를 다시 띄웁니다...\n", svc.ActiveImage)
+			if rerr := p.restorePrevious(ctx, proj, svc, dep.ID); rerr != nil {
+				logger.Writef("[rollback] 이전 이미지 복구 실패: %v\n", rerr)
+				_, _ = p.store.UpdateServiceRuntimeStatus(svc.ID, "failed", "", "", "", time.Now().UnixNano(), false)
+				p.notifyCanvas(svc.ProjectID, svc.EnvironmentID, svc.ID, "failed")
+			}
+		}
+		diag := DiagnoseFailure(stage, cause, logger.Tail())
+		_ = p.store.FailDeployment(dep.ID, stage, diag.Code, diag.TitleKo, diag.DetailKo)
+		return cause
+	}
 	logger.Writef("==> [복원] 이미지 %s 로 새 컨테이너를 기동합니다...\n", imageTag)
 
-	info, err := p.engine.StartContainer(ctx, docker.ContainerSpec{
-		Name:           candidateName,
-		Image:          imageTag,
-		Env:            formatDockerEnv(envMap),
+	info, err := p.engine.StartContainer(ctx, p.appContainerSpec(proj, svc, candidateName, imageTag, formatDockerEnv(envMap)))
+	if err != nil {
+		return failRelaunch(StageStartingNew, err)
+	}
+	p.setStage(dep, StageHealthchecking, imageTag, info.ID)
+	if err := p.waitHealthy(ctx, info, svc); err != nil {
+		_ = p.engine.RemoveContainer(ctx, info.ID)
+		return failRelaunch(StageHealthchecking, err)
+	}
+
+	p.setStage(dep, StageSwitching, imageTag, info.ID)
+	_, _ = p.store.UpdateServiceRuntimeStatus(svc.ID, "running", info.ID, info.Name, imageTag, time.Now().UnixNano(), true)
+	if p.router != nil {
+		_ = p.router.Sync(ctx)
+	}
+	if oldContainerID != "" && oldContainerID != info.ID {
+		if !stopFirst {
+			time.Sleep(p.drainDelay)
+		}
+		_ = p.engine.StopContainer(ctx, oldContainerID, 10*time.Second)
+		_ = p.engine.RemoveContainer(ctx, oldContainerID)
+	}
+	_ = p.store.CompleteDeployment(dep.ID, imageTag, info.ID)
+	p.notifyCanvas(svc.ProjectID, svc.EnvironmentID, svc.ID, "running")
+	return nil
+}
+
+// appContainerSpec is the single place app containers are described, so every launch path
+// (deploy, rollback, restart, failure restore) mounts the service's data folder the same way.
+func (p *Pipeline) appContainerSpec(proj *db.Project, svc *db.Service, name, image string, env []string) docker.ContainerSpec {
+	spec := docker.ContainerSpec{
+		Name:           name,
+		Image:          image,
+		Env:            env,
 		ProjectNetwork: proj.NetworkName,
 		NetworkAliases: []string{svc.Slug},
 		AttachIngress:  true,
@@ -684,33 +754,68 @@ func (p *Pipeline) relaunchImage(ctx context.Context, proj *db.Project, svc *db.
 			docker.LabelServiceID: svc.ID,
 			docker.LabelKind:      "app",
 		},
-	})
+	}
+	if svc.DataPath != "" {
+		spec.Mounts = []docker.MountSpec{{Type: "volume", Source: serviceVolumeName(proj, svc), Target: svc.DataPath}}
+	}
+	return spec
+}
+
+// restorePrevious relaunches the service's last active image after a stop-first rollout failed,
+// then points routing at it and removes the stopped old container.
+func (p *Pipeline) restorePrevious(ctx context.Context, proj *db.Project, svc *db.Service, depID string) error {
+	if svc.ActiveImage == "" {
+		return fmt.Errorf("복구할 이전 이미지 정보가 없습니다")
+	}
+	envMap, err := p.store.ResolveServiceRuntimeEnv(svc.ID)
 	if err != nil {
-		diag := DiagnoseFailure(StageStartingNew, err, logger.Tail())
-		_ = p.store.FailDeployment(dep.ID, StageStartingNew, diag.Code, diag.TitleKo, diag.DetailKo)
 		return err
 	}
-	p.setStage(dep, StageHealthchecking, imageTag, info.ID)
+	if _, hasPort := envMap["PORT"]; !hasPort && svc.Port > 0 {
+		envMap["PORT"] = strconv.Itoa(svc.Port)
+	}
+	shortID := depID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	name := fmt.Sprintf("ssc-%s-%s-%s-restore", proj.Slug, svc.Slug, shortID)
+	info, err := p.engine.StartContainer(ctx, p.appContainerSpec(proj, svc, name, svc.ActiveImage, formatDockerEnv(envMap)))
+	if err != nil {
+		return err
+	}
 	if err := p.waitHealthy(ctx, info, svc); err != nil {
 		_ = p.engine.RemoveContainer(ctx, info.ID)
-		diag := DiagnoseFailure(StageHealthchecking, err, logger.Tail())
-		_ = p.store.FailDeployment(dep.ID, StageHealthchecking, diag.Code, diag.TitleKo, diag.DetailKo)
 		return err
 	}
-
-	p.setStage(dep, StageSwitching, imageTag, info.ID)
-	_, _ = p.store.UpdateServiceRuntimeStatus(svc.ID, "running", info.ID, info.Name, imageTag, time.Now().UnixNano(), true)
+	if _, err := p.store.UpdateServiceRuntimeStatus(svc.ID, "running", info.ID, info.Name, svc.ActiveImage, time.Now().UnixNano(), false); err != nil {
+		return err
+	}
 	if p.router != nil {
 		_ = p.router.Sync(ctx)
 	}
-	if oldContainerID != "" && oldContainerID != info.ID {
-		time.Sleep(p.drainDelay)
-		_ = p.engine.StopContainer(ctx, oldContainerID, 10*time.Second)
-		_ = p.engine.RemoveContainer(ctx, oldContainerID)
+	if svc.ActiveContainerID != "" && svc.ActiveContainerID != info.ID {
+		_ = p.engine.RemoveContainer(ctx, svc.ActiveContainerID)
 	}
-	_ = p.store.CompleteDeployment(dep.ID, imageTag, info.ID)
 	p.notifyCanvas(svc.ProjectID, svc.EnvironmentID, svc.ID, "running")
 	return nil
+}
+
+// stopForReplace stops the old container; a container that no longer exists counts as stopped.
+func (p *Pipeline) stopForReplace(ctx context.Context, containerID string) error {
+	err := p.engine.StopContainer(ctx, containerID, 30*time.Second)
+	if err != nil {
+		if _, ierr := p.engine.InspectContainer(ctx, containerID); ierr != nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func serviceVolumeName(proj *db.Project, svc *db.Service) string {
+	if svc.VolumeName != "" {
+		return svc.VolumeName
+	}
+	return fmt.Sprintf("ssc-vol-%s-%s", proj.Slug, svc.Slug)
 }
 
 func (p *Pipeline) setStage(dep *db.Deployment, stage, imageTag, containerID string) {
@@ -778,10 +883,7 @@ func buildDatabaseContainerSpec(proj *db.Project, svc *db.Service) (docker.Conta
 		return docker.ContainerSpec{}, nil, err
 	}
 
-	volName := svc.VolumeName
-	if volName == "" {
-		volName = fmt.Sprintf("ssc-vol-%s-%s", proj.Slug, svc.Slug)
-	}
+	volName := serviceVolumeName(proj, svc)
 	containerName := fmt.Sprintf("ssc-%s-%s", proj.Slug, svc.Slug)
 
 	var targetDir, imageName string

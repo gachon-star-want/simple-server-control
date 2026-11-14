@@ -184,7 +184,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=${INSTALL_BIN} serve
 Environment=SSC_DATA_DIR=${DATA_DIR}
-Environment=SSC_LISTEN_ADDR=:8080
+Environment=SSC_LISTEN_ADDR=127.0.0.1:8080
 WorkingDirectory=${DATA_DIR}
 Restart=always
 RestartSec=3
@@ -195,11 +195,19 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
+# Optional HTTPS domain for the panel (also settable later: sudo ssc panel-domain <domain>).
+PANEL_DOMAIN="${SSC_PANEL_DOMAIN:-}"
+if [[ -n "$PANEL_DOMAIN" ]]; then
+  SSC_DATA_DIR="${DATA_DIR}" "${INSTALL_BIN}" panel-domain "$PANEL_DOMAIN" >/dev/null 2>&1 \
+    || warn "관리 화면 도메인 설정에 실패했습니다. 설치 후 'sudo ssc panel-domain ${PANEL_DOMAIN}' 을 실행해 주세요."
+fi
+
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}" >/dev/null
 systemctl restart "${SERVICE_NAME}"
 
-AUTO_UPDATE="${SSC_AUTO_UPDATE:-true}"
+# Off by default: updates replace the binary that controls every app, so the operator opts in.
+AUTO_UPDATE="${SSC_AUTO_UPDATE:-false}"
 AUTO_UPDATE_LABEL="비활성 (수동: sudo ssc auto-update on)"
 if [[ "${AUTO_UPDATE}" == "true" ]]; then
   if SSC_DATA_DIR="${DATA_DIR}" SSC_REPO="${REPO}" "${INSTALL_BIN}" auto-update on >/dev/null 2>&1; then
@@ -210,10 +218,11 @@ if [[ "${AUTO_UPDATE}" == "true" ]]; then
 fi
 
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  log "활성화된 UFW 방화벽에 80, 443, 8080 포트를 허용합니다..."
+  log "활성화된 UFW 방화벽에 80, 443 포트를 허용합니다 (관리 화면 8080은 열지 않습니다)..."
   ufw allow 80/tcp >/dev/null || true
   ufw allow 443/tcp >/dev/null || true
-  ufw allow 8080/tcp >/dev/null || true
+  # Earlier versions opened 8080; the panel now listens on 127.0.0.1 only.
+  ufw delete allow 8080/tcp >/dev/null 2>&1 || true
 fi
 
 PUBLIC_IP="$(curl -fsSL --max-time 3 https://api4.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')"
@@ -223,7 +232,14 @@ echo ""
 echo "====================================================================="
 echo "  Simple Server Control 설치가 완료되었습니다!"
 echo "---------------------------------------------------------------------"
-echo "  대시보드 접속 : http://${PUBLIC_IP}:8080"
+if [[ -n "$PANEL_DOMAIN" ]]; then
+  echo "  대시보드 접속 : https://${PANEL_DOMAIN}  (DNS A 레코드 → ${PUBLIC_IP})"
+else
+  echo "  대시보드 접속 : 서버 안(127.0.0.1:8080)에서만 열립니다. 내 컴퓨터에서:"
+  echo "                    ssh -L 8080:127.0.0.1:8080 root@${PUBLIC_IP}"
+  echo "                  그다음 브라우저에서 http://localhost:8080"
+  echo "  도메인 연결   : sudo ssc panel-domain ssc.내도메인.com"
+fi
 echo "  Setup Token   : ${SETUP_TOKEN}"
 echo "  데이터 경로   : ${DATA_DIR}"
 echo "  자동 업데이트 : ${AUTO_UPDATE_LABEL}"

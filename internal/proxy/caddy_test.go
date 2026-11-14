@@ -48,7 +48,7 @@ func TestCaddyMultiDomainSyncAndSkipUnverifiedHTTPS(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	router := proxy.NewCaddyRouter(store, nil, srv.URL, "ssc-ingress", t.TempDir(), ":8080", "example.com")
+	router := proxy.NewCaddyRouter(store, nil, srv.URL, "ssc-ingress", t.TempDir(), "example.com")
 	if err := router.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -73,5 +73,19 @@ func TestCaddyMultiDomainSyncAndSkipUnverifiedHTTPS(t *testing.T) {
 
 	if auto := router.AutoDomain("api", "pleum"); auto != "api-pleum.example.com" {
 		t.Fatalf("unexpected auto domain: %q", auto)
+	}
+}
+
+func TestIsCloudflareIP(t *testing.T) {
+	for ip, want := range map[string]bool{
+		"104.21.32.1":   true,  // typical proxied A record
+		"172.67.10.10":  true,
+		"2606:4700::1":  true,
+		"203.0.113.10":  false, // a VPS
+		"not-an-ip":     false,
+	} {
+		if got := proxy.IsCloudflareIP(ip); got != want {
+			t.Errorf("IsCloudflareIP(%q) = %v, want %v", ip, got, want)
+		}
 	}
 }

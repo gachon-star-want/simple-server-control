@@ -17,6 +17,7 @@ import type { CanvasService, ProjectCanvas } from "../types";
 import { IngressNode } from "../components/canvas/IngressNode";
 import { AppNode } from "../components/canvas/AppNode";
 import { DatabaseNode } from "../components/canvas/DatabaseNode";
+import { VolumeNode } from "../components/canvas/VolumeNode";
 import { AddServiceModal } from "../components/AddServiceModal";
 import { LinkSecretModal } from "../components/LinkSecretModal";
 import { SecretEditor } from "../components/SecretEditor";
@@ -26,6 +27,7 @@ const nodeTypes = {
   ingress: IngressNode,
   app: AppNode,
   database: DatabaseNode,
+  volume: VolumeNode,
 };
 
 interface ProjectCanvasPageProps {
@@ -100,6 +102,17 @@ export function ProjectCanvasPage({ projectId, onGoSettings }: ProjectCanvasPage
           selected: svc.id === selectedServiceId,
         },
       })),
+      // Child nodes must follow their parents in the array.
+      ...canvas.services
+        .filter((svc) => svc.kind === "app" && svc.data_path)
+        .map((svc) => ({
+          id: `disk-${svc.id}`,
+          type: "volume",
+          parentId: svc.id,
+          position: { x: 30, y: 215 },
+          draggable: false,
+          data: { dataPath: svc.data_path, volumeName: svc.volume_name },
+        })),
     ];
     setNodes(nextNodes);
   }, [canvas, selectedServiceId]);
@@ -115,6 +128,16 @@ export function ProjectCanvasPage({ projectId, onGoSettings }: ProjectCanvasPage
           target: svc.id,
           animated: svc.status === "running" || svc.status === "deploying",
           style: { stroke: svc.status === "running" ? "#34D399" : "#52525B", strokeWidth: 2 },
+        });
+      }
+    }
+    for (const svc of canvas.services) {
+      if (svc.kind === "app" && svc.data_path) {
+        list.push({
+          id: `disk-edge-${svc.id}`,
+          source: svc.id,
+          target: `disk-${svc.id}`,
+          style: { stroke: "#F59E0B", strokeWidth: 2 },
         });
       }
     }
@@ -139,7 +162,7 @@ export function ProjectCanvasPage({ projectId, onGoSettings }: ProjectCanvasPage
 
   const handleNodeDragStop = useCallback(
     (_: unknown, dragged: Node) => {
-      if (!canvas || dragged.id === "ingress-root") return;
+      if (!canvas || dragged.id === "ingress-root" || dragged.id.startsWith("disk-")) return;
       void api.savePositions(canvas.project.id, canvas.active_environment.id, [
         { service_id: dragged.id, pos_x: dragged.position.x, pos_y: dragged.position.y },
       ]);
@@ -253,7 +276,7 @@ export function ProjectCanvasPage({ projectId, onGoSettings }: ProjectCanvasPage
           onConnect={handleConnect}
           onNodeClick={(_, node) => {
             if (node.id !== "ingress-root") {
-              setSelectedServiceId(node.id);
+              setSelectedServiceId(node.parentId ?? node.id);
             }
           }}
           onEdgeClick={(_, edge) => {

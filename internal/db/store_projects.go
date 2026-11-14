@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ type CreateServiceInput struct {
 	HealthcheckTimeout int     `json:"healthcheck_timeout"`
 	AutoDeploy         *bool   `json:"auto_deploy,omitempty"`
 	VolumeName         string  `json:"volume_name"`
+	DataPath           string  `json:"data_path"`
 	PosX               float64 `json:"pos_x"`
 	PosY               float64 `json:"pos_y"`
 }
@@ -44,6 +46,46 @@ type UpdateServiceInput struct {
 	HealthcheckPath    *string `json:"healthcheck_path,omitempty"`
 	HealthcheckTimeout *int    `json:"healthcheck_timeout,omitempty"`
 	AutoDeploy         *bool   `json:"auto_deploy,omitempty"`
+	DataPath           *string `json:"data_path,omitempty"`
+}
+
+// NormalizeDataPath validates an app's persistent folder: empty (none) or an absolute path other than "/".
+func NormalizeDataPath(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("보관 폴더는 /data 처럼 /로 시작해야 합니다")
+	}
+	p = path.Clean(p)
+	if p == "/" {
+		return "", fmt.Errorf("보관 폴더로 / 전체는 쓸 수 없습니다")
+	}
+	return p, nil
+}
+
+// defaultVolumeName matches the naming used for database volumes (ssc-vol-<project>-<service>).
+func defaultVolumeName(q interface {
+	QueryRow(string, ...any) *sql.Row
+}, projectID, serviceSlug string) string {
+	var projSlug string
+	_ = q.QueryRow(`SELECT slug FROM projects WHERE id = ?`, projectID).Scan(&projSlug)
+	return fmt.Sprintf("ssc-vol-%s-%s", projSlug, serviceSlug)
+}
+
+// ListPublicHostnames returns every routed domain plus the panel domain, for diagnostics.
+func (s *Store) ListPublicHostnames() []string {
+	var hosts []string
+	if panel, _, _ := s.GetSetting("panel_domain"); panel != "" {
+		hosts = append(hosts, panel)
+	}
+	if targets, err := s.ListAllRouteTargets(); err == nil {
+		for _, t := range targets {
+			hosts = append(hosts, t.Domain.Hostname)
+		}
+	}
+	return hosts
 }
 
 // RouteTarget pairs a verified domain with its upstream Docker DNS target for Caddy routing.
@@ -358,6 +400,14 @@ func (s *Store) CreateService(in CreateServiceInput) (*Service, error) {
 	if in.AutoDeploy != nil {
 		autoDeploy = *in.AutoDeploy
 	}
+	dataPath, err := NormalizeDataPath(in.DataPath)
+	if err != nil {
+		return nil, err
+	}
+	volumeName := in.VolumeName
+	if volumeName == "" && dataPath != "" {
+		volumeName = defaultVolumeName(tx, in.ProjectID, slug)
+	}
 
 	now := time.Now().UTC()
 	svc := &Service{
@@ -380,7 +430,8 @@ func (s *Store) CreateService(in CreateServiceInput) (*Service, error) {
 		HealthcheckTimeout: hcTimeout,
 		AutoDeploy:         autoDeploy,
 		Status:             "idle",
-		VolumeName:         in.VolumeName,
+		VolumeName:         volumeName,
+		DataPath:           dataPath,
 		PosX:               posX,
 		PosY:               posY,
 		CreatedAt:          now,
@@ -398,13 +449,13 @@ func (s *Store) CreateService(in CreateServiceInput) (*Service, error) {
 			github_app_id, repo_full_name, repo_branch, root_dir, dockerfile_path,
 			build_pack, port, healthcheck_path, healthcheck_timeout, auto_deploy,
 			secrets_dirty, status, status_observed_at, active_container_id, active_container_name, active_image,
-			volume_name, pos_x, pos_y, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'idle', 0, '', '', '', ?, ?, ?, ?, ?)
+			volume_name, data_path, pos_x, pos_y, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'idle', 0, '', '', '', ?, ?, ?, ?, ?, ?)
 	`,
 		svc.ID, svc.ProjectID, svc.EnvironmentID, svc.Name, svc.Slug, svc.Kind, svc.DBType, svc.DBImage,
 		ghAppID, svc.RepoFullName, svc.RepoBranch, svc.RootDir, svc.DockerfilePath,
 		svc.BuildPack, svc.Port, svc.HealthcheckPath, svc.HealthcheckTimeout, boolToInt(svc.AutoDeploy),
-		svc.VolumeName, svc.PosX, svc.PosY, svc.CreatedAt, svc.UpdatedAt,
+		svc.VolumeName, svc.DataPath, svc.PosX, svc.PosY, svc.CreatedAt, svc.UpdatedAt,
 	); err != nil {
 		return nil, fmt.Errorf("insert service: %w", err)
 	}
@@ -471,16 +522,26 @@ func (s *Store) UpdateService(id string, in UpdateServiceInput) (*Service, error
 	if in.AutoDeploy != nil {
 		svc.AutoDeploy = *in.AutoDeploy
 	}
+	if in.DataPath != nil {
+		dp, err := NormalizeDataPath(*in.DataPath)
+		if err != nil {
+			return nil, err
+		}
+		svc.DataPath = dp
+		if dp != "" && svc.VolumeName == "" {
+			svc.VolumeName = defaultVolumeName(s.db, svc.ProjectID, svc.Slug)
+		}
+	}
 
 	if _, err := s.db.Exec(`
 		UPDATE services SET
 			name = ?, repo_branch = ?, root_dir = ?, dockerfile_path = ?,
 			build_pack = ?, port = ?, healthcheck_path = ?, healthcheck_timeout = ?,
-			auto_deploy = ?, updated_at = CURRENT_TIMESTAMP
+			auto_deploy = ?, data_path = ?, volume_name = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, svc.Name, svc.RepoBranch, svc.RootDir, svc.DockerfilePath,
 		svc.BuildPack, svc.Port, svc.HealthcheckPath, svc.HealthcheckTimeout,
-		boolToInt(svc.AutoDeploy), id); err != nil {
+		boolToInt(svc.AutoDeploy), svc.DataPath, svc.VolumeName, id); err != nil {
 		return nil, fmt.Errorf("update service %s: %w", id, err)
 	}
 	return s.GetService(id)
@@ -849,7 +910,7 @@ const serviceSelectCols = `
 	github_app_id, repo_full_name, repo_branch, root_dir, dockerfile_path,
 	build_pack, port, healthcheck_path, healthcheck_timeout, auto_deploy,
 	secrets_dirty, status, status_observed_at, active_container_id, active_container_name, active_image,
-	volume_name, pos_x, pos_y, created_at, updated_at
+	volume_name, data_path, pos_x, pos_y, created_at, updated_at
 `
 
 type rowScanner interface {
@@ -865,7 +926,7 @@ func scanService(row rowScanner) (*Service, error) {
 		&ghAppID, &svc.RepoFullName, &svc.RepoBranch, &svc.RootDir, &svc.DockerfilePath,
 		&svc.BuildPack, &svc.Port, &svc.HealthcheckPath, &svc.HealthcheckTimeout, &autoDeploy,
 		&dirty, &svc.Status, &svc.StatusObservedAt, &svc.ActiveContainerID, &svc.ActiveContainerName, &svc.ActiveImage,
-		&svc.VolumeName, &svc.PosX, &svc.PosY, &svc.CreatedAt, &svc.UpdatedAt,
+		&svc.VolumeName, &svc.DataPath, &svc.PosX, &svc.PosY, &svc.CreatedAt, &svc.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

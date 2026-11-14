@@ -20,6 +20,7 @@ type Config struct {
 	BaseDomain     string
 	MasterKeyPath  string
 	SetupTokenPath string
+	PanelSocket    string // Unix socket Caddy uses to reach the panel (see proxy.PanelSocketName)
 	SetupToken     string
 	JWTSecret      string
 	PublicOrigin   string
@@ -41,13 +42,15 @@ func Load() (*Config, error) {
 		Version:        "0.1.0-dev",
 		Repo:           envOr("SSC_REPO", "gachon-star-want/simple-server-control"),
 		DataDir:        dataDir,
-		ListenAddr:     envOr("SSC_LISTEN_ADDR", ":8080"),
+		// Loopback only: the panel is reached via SSH tunnel or the HTTPS panel domain through Caddy.
+		ListenAddr:     envOr("SSC_LISTEN_ADDR", "127.0.0.1:8080"),
 		CaddyAdminURL:  strings.TrimRight(envOr("SSC_CADDY_ADMIN_URL", "http://127.0.0.1:2019"), "/"),
 		BuildkitAddr:   envOr("SSC_BUILDKIT_HOST", "docker-container://ssc-buildkit"),
 		IngressNetwork: envOr("SSC_INGRESS_NETWORK", "ssc-ingress"),
 		BaseDomain:     strings.TrimSpace(os.Getenv("SSC_BASE_DOMAIN")),
 		MasterKeyPath:  filepath.Join(dataDir, "master.key"),
 		SetupTokenPath: filepath.Join(dataDir, "setup.token"),
+		PanelSocket:    filepath.Join(dataDir, "caddy", "config", "panel.sock"),
 		PublicOrigin:   strings.TrimRight(strings.TrimSpace(os.Getenv("SSC_PUBLIC_ORIGIN")), "/"),
 	}
 

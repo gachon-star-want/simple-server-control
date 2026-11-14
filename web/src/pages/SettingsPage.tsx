@@ -265,7 +265,7 @@ export function SettingsPage() {
             <span>컨트롤 패널 자체 도메인 (선택)</span>
           </div>
           <p className="text-xs text-zinc-400">
-            서버 IP:8080 대신 <code className="text-zinc-200">https://panel.내도메인.com</code> 으로 안전하게 대시보드에 접속하고 GitHub Webhook HTTPS를 받으려면 연결할 도메인을 입력하세요.
+            SSH 터널 대신 <code className="text-zinc-200">https://panel.내도메인.com</code> 으로 안전하게 대시보드에 접속하고 GitHub Webhook HTTPS를 받으려면 연결할 도메인을 입력하세요.
           </p>
           <form onSubmit={handleSavePanelDomain} className="flex gap-2">
             <input

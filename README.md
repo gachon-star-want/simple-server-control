@@ -46,9 +46,16 @@ curl -fsSL https://raw.githubusercontent.com/gachon-star-want/simple-server-cont
 2. 공식 Docker CE 설치 및 다중 프로젝트용 IP 대역 풀(`10.0.0.0/8`, `/etc/docker/daemon.json`) + 로그 로테이션 설정
 3. 저사양 VPS(RAM ≤ 2.5GB)에서 빌드 중 메모리 부족(OOM)을 막기 위한 2GB Swap 자동 생성
 4. Railpack / Git 설치 및 바이너리 SHA-256 무결성 검증
-5. `systemd` 서비스(`simple-server-control.service`), **매일 1회 자동 업데이트 타이머(`simple-server-control-update.timer`)** 등록 및 초기 1회용 `Setup Token` 발급
+5. `systemd` 서비스(`simple-server-control.service`) 등록 및 초기 1회용 `Setup Token` 발급 (자동 업데이트는 기본 꺼짐 — `SSC_AUTO_UPDATE=true` 로 설치하거나 나중에 `sudo ssc auto-update on`)
 
-설치 후 터미널에 출력되는 대시보드 주소(`http://<서버IP>:8080`)로 접속해 Setup Token과 관리자 계정을 등록하면 바로 사용할 수 있습니다.
+관리 화면은 보안을 위해 서버 안(`127.0.0.1:8080`)에서만 열립니다. 처음에는 내 컴퓨터에서 SSH 터널로 접속해 Setup Token과 관리자 계정을 등록하세요.
+
+```bash
+ssh -L 8080:127.0.0.1:8080 root@<서버IP>
+# 브라우저에서 http://localhost:8080
+```
+
+이후 `sudo ssc panel-domain ssc.내도메인.com` 으로 HTTPS 도메인을 연결하면 어디서나 접속할 수 있습니다 (설치할 때 `SSC_PANEL_DOMAIN=ssc.내도메인.com` 으로 미리 정해도 됩니다). 같은 IP에서 로그인을 5번 틀리면 15분간 막힙니다. 자동 업데이트는 기본으로 꺼져 있으며 `sudo ssc auto-update on` 으로 켤 수 있습니다.
 
 ---
 

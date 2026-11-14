@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -56,6 +57,8 @@ func main() {
 		err = runAutoUpdate(os.Args[2:])
 	case "reset-password":
 		err = runResetPassword(os.Args[2:])
+	case "panel-domain":
+		err = runPanelDomain(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("simple-server-control (ssc) %s (commit %s, built %s)\n", Version, Commit, Date)
 	case "help", "-h", "--help":
@@ -80,6 +83,7 @@ func printUsage() {
   ssc upgrade                  GitHub 최신 릴리스 확인 및 SHA-256 검증 업데이트
   ssc auto-update [on|off|status|now]  매일 자동 업데이트 타이머 설정 및 조회
   ssc reset-password           관리자 비밀번호 초기화
+  ssc panel-domain [도메인|off] 관리 화면 HTTPS 도메인 조회/설정 (예: ssc panel-domain ssc.example.com)
   ssc version                  버전 정보 출력
 `)
 }
@@ -137,7 +141,7 @@ func runServe() error {
 		})
 	}
 
-	rtr := proxy.NewCaddyRouter(store, eng, cfg.CaddyAdminURL, cfg.IngressNetwork, cfg.DataDir, cfg.ListenAddr, cfg.BaseDomain)
+	rtr := proxy.NewCaddyRouter(store, eng, cfg.CaddyAdminURL, cfg.IngressNetwork, cfg.DataDir, cfg.BaseDomain)
 	builder := build.NewContainerBuilder(eng, filepath.Join(cfg.DataDir, "repos"), cfg.BuildkitAddr)
 	ghClient := github.NewClient(store, "")
 	pipe := deploy.NewPipeline(store, eng, rtr, builder, ghClient, filepath.Join(cfg.DataDir, "logs"), cfg.IngressNetwork, onChange)
@@ -167,12 +171,28 @@ func runServe() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	if !isLoopbackAddr(cfg.ListenAddr) {
+		slog.Warn("관리 화면이 서버 밖에서도 접속 가능한 주소로 열려 있습니다. SSC_LISTEN_ADDR=127.0.0.1:8080 을 권장합니다", "listen", cfg.ListenAddr)
+	}
 	if count, _ := store.CountUsers(); count == 0 {
+		_, port, _ := net.SplitHostPort(cfg.ListenAddr)
 		fmt.Println("================================================================")
 		fmt.Println(" Simple Server Control 초기 설정이 필요합니다")
-		fmt.Printf("  대시보드 주소 : http://<서버IP>%s\n", cfg.ListenAddr)
+		fmt.Println("  관리 화면은 서버 안에서만 열립니다. 내 컴퓨터에서 SSH 터널로 접속하세요:")
+		fmt.Printf("    ssh -L %s:127.0.0.1:%s root@<서버IP>\n", port, port)
+		fmt.Printf("    브라우저: http://localhost:%s\n", port)
 		fmt.Printf("  Setup Token   : %s\n", cfg.SetupToken)
+		fmt.Println("  도메인으로 열기: sudo ssc panel-domain ssc.내도메인.com")
 		fmt.Println("================================================================")
+	}
+
+	// Caddy reaches the panel only through this Unix socket (bind-mounted into its container).
+	var sockServer *http.Server
+	if ln, sockErr := listenUnixSocket(cfg.PanelSocket); sockErr != nil {
+		slog.Warn("관리 화면 소켓을 열지 못했습니다 — 도메인(HTTPS) 접속이 동작하지 않습니다", "path", cfg.PanelSocket, "error", sockErr)
+	} else {
+		sockServer = &http.Server{Handler: api.ViaProxy(srv.Router()), ReadHeaderTimeout: 10 * time.Second}
+		go func() { _ = sockServer.Serve(ln) }()
 	}
 
 	slog.Info("Simple Server Control 시작", "listen", cfg.ListenAddr, "data_dir", cfg.DataDir, "version", Version)
@@ -189,10 +209,85 @@ func runServe() error {
 	case <-ctx.Done():
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if sockServer != nil {
+			_ = sockServer.Shutdown(shutCtx)
+		}
 		return httpServer.Shutdown(shutCtx)
 	case serveErr := <-errCh:
 		return serveErr
 	}
+}
+
+func listenUnixSocket(path string) (net.Listener, error) {
+	_ = os.Remove(path) // stale socket from a previous run
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	return ln, nil
+}
+
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// runPanelDomain shows or changes the HTTPS domain Caddy serves the panel on.
+func runPanelDomain(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	store, _, err := openBackend(cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	if len(args) == 0 {
+		cur, _, _ := store.GetSetting("panel_domain")
+		if cur == "" {
+			fmt.Println("관리 화면 도메인: 없음 (SSH 터널로만 접속). 설정: sudo ssc panel-domain ssc.내도메인.com")
+		} else {
+			fmt.Printf("관리 화면 도메인: https://%s\n", cur)
+		}
+		return nil
+	}
+	dom := strings.ToLower(strings.TrimSpace(args[0]))
+	if dom == "off" || dom == "none" {
+		dom = ""
+	} else if strings.ContainsAny(dom, "/: ") || !strings.Contains(dom, ".") {
+		return fmt.Errorf("도메인만 입력해 주세요 (예: ssc.example.com, https:// 없이)")
+	}
+	if err := store.SetSetting("panel_domain", dom); err != nil {
+		return err
+	}
+	rtr := proxy.NewCaddyRouter(store, nil, cfg.CaddyAdminURL, cfg.IngressNetwork, cfg.DataDir, cfg.BaseDomain)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	syncErr := rtr.Sync(ctx)
+	if dom == "" {
+		fmt.Println("관리 화면 도메인을 해제했습니다. 이제 SSH 터널로만 접속할 수 있습니다.")
+	} else {
+		fmt.Printf("관리 화면 도메인을 https://%s 로 설정했습니다.\n", dom)
+		fmt.Printf("  DNS에서 %s 의 A 레코드를 이 서버 IP로 지정해 주세요.\n", dom)
+		fmt.Println("  관리 화면 도메인은 Cloudflare 회색 구름(DNS only)을 권장합니다. 주황 구름이라면: " + proxy.CloudflareGuideKo)
+	}
+	if syncErr != nil {
+		fmt.Println("  (Caddy가 아직 실행 중이 아니어서 ssc 서비스가 시작될 때 반영됩니다)")
+	}
+	return nil
 }
 
 func runDoctor() error {
@@ -206,6 +301,13 @@ func runDoctor() error {
 	}
 
 	checks := doctor.RunAll(context.Background(), eng, cfg.DataDir, cfg.CaddyAdminURL)
+	checks = append(checks, doctor.CheckPanelExposure(cfg.ListenAddr))
+	if vault, verr := crypto.LoadOrCreateVault(cfg.MasterKeyPath); verr == nil {
+		if store, serr := db.Open(filepath.Join(cfg.DataDir, "ssc.db"), vault); serr == nil {
+			checks = append(checks, doctor.CheckDomains(context.Background(), store.ListPublicHostnames())...)
+			_ = store.Close()
+		}
+	}
 	fmt.Println("=== Simple Server Control 서버 진단 (ssc doctor) ===")
 	hasFail := false
 	for _, c := range checks {

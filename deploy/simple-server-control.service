@@ -9,7 +9,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/ssc serve
 Environment=SSC_DATA_DIR=/var/lib/ssc
-Environment=SSC_LISTEN_ADDR=:8080
+Environment=SSC_LISTEN_ADDR=127.0.0.1:8080
 WorkingDirectory=/var/lib/ssc
 Restart=always
 RestartSec=3

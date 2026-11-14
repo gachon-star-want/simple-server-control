@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,16 +103,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := clientIP(r)
+	if wait := s.logins.retryAfter(ip); wait > 0 {
+		mins := int(wait.Minutes()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		writeError(w, http.StatusTooManyRequests, "LOGIN_LOCKED",
+			fmt.Sprintf("로그인을 %d번 잘못 시도해 이 IP에서의 로그인을 잠시 막았습니다. 약 %d분 뒤에 다시 시도해 주세요.", loginMaxFails, mins))
+		return
+	}
+
 	email := strings.ToLower(strings.TrimSpace(req.Email))
 	user, err := s.store.GetUserByEmail(email)
 	if err != nil {
+		s.logins.fail(ip)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다.")
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		s.logins.fail(ip)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다.")
 		return
 	}
+	s.logins.reset(ip)
 
 	if err := s.setSessionCookie(w, r, user); err != nil {
 		writeError(w, http.StatusInternalServerError, "JWT_ERROR", err.Error())

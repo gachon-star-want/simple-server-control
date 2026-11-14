@@ -65,6 +65,7 @@ export function ServiceInspectorDrawer({ service, onClose, onRefresh }: Props) {
   const [hcTimeout, setHcTimeout] = useState(String(service.healthcheck_timeout || 30));
   const [buildPack, setBuildPack] = useState(service.build_pack || "auto");
   const [autoDeploy, setAutoDeploy] = useState(service.auto_deploy);
+  const [dataPath, setDataPath] = useState(service.data_path || "");
 
   const [busy, setBusy] = useState(false);
   const [actionMsg, setActionMsg] = useState("");
@@ -80,6 +81,7 @@ export function ServiceInspectorDrawer({ service, onClose, onRefresh }: Props) {
     setHcTimeout(String(service.healthcheck_timeout || 30));
     setBuildPack(service.build_pack || "auto");
     setAutoDeploy(service.auto_deploy);
+    setDataPath(service.data_path || "");
     void loadDeployments();
   }, [service.id]);
 
@@ -246,6 +248,7 @@ export function ServiceInspectorDrawer({ service, onClose, onRefresh }: Props) {
         healthcheck_timeout: Number(hcTimeout) || 30,
         build_pack: buildPack,
         auto_deploy: autoDeploy,
+        data_path: dataPath.trim(),
       });
       setActionMsg("설정이 저장되었습니다. 변경 사항을 반영하려면 재배포하세요.");
       onRefresh();
@@ -372,7 +375,7 @@ export function ServiceInspectorDrawer({ service, onClose, onRefresh }: Props) {
             {/* 6-Stage Zero-Downtime Stepper */}
             <div className="rounded-xl border border-zinc-800 bg-[#0D1017] p-4">
               <div className="mb-3 flex items-center justify-between text-xs">
-                <span className="font-semibold text-zinc-200">무중단 배포 진행 단계</span>
+                <span className="font-semibold text-zinc-200">{service.data_path ? "배포 진행 단계 (멈추고 바꾸기)" : "무중단 배포 진행 단계"}</span>
                 <span className="font-mono text-zinc-400">
                   {activeDep ? (activeDep.status === "succeeded" ? "완료됨" : activeDep.status === "failed" ? "실패" : liveStage || "대기") : "기록 없음"}
                 </span>
@@ -668,6 +671,20 @@ export function ServiceInspectorDrawer({ service, onClose, onRefresh }: Props) {
                       <option value="dockerfile">Dockerfile</option>
                     </select>
                   </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-zinc-300">보관 폴더 (선택)</label>
+                  <input
+                    value={dataPath}
+                    onChange={(e) => setDataPath(e.target.value)}
+                    placeholder="예: /data"
+                    className="w-full rounded-xl border border-zinc-800 bg-[#0D1017] px-3 py-2 text-xs text-zinc-100"
+                  />
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    {service.volume_name
+                      ? `디스크 '${service.volume_name}'에 보관됩니다. 배포는 "멈추고 바꾸기"로 진행되어 수 초간 접속이 끊깁니다.`
+                      : "지정하면 다시 배포해도 이 폴더의 파일이 남습니다 (SQLite 등). 비우면 무중단 배포."}
+                  </p>
                 </div>
                 <label className="flex items-center gap-2 text-xs text-zinc-200 cursor-pointer">
                   <input

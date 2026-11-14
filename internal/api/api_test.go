@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -190,4 +191,62 @@ func TestAPISetupAuthProjectsSecretsAndWebhook(t *testing.T) {
 	}
 	// Wait briefly so background webhook goroutine finishes cleanly before TempDir/DB closes.
 	time.Sleep(100 * time.Millisecond)
+}
+
+func TestLoginLockoutAfterFiveFailuresCannotBeSpoofed(t *testing.T) {
+	tmp := t.TempDir()
+	vault, _ := crypto.NewVaultFromKey(bytes.Repeat([]byte{0x78}, 32))
+	store, err := db.Open(filepath.Join(tmp, "api.db"), vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{DataDir: tmp, SetupToken: "tok", JWTSecret: "test-jwt-secret-key-0123456789abcdef"}
+	srv := api.NewServer(cfg, store, nil, &stubRouter{}, nil, nil, nil, nil)
+	direct := httptest.NewServer(srv.Router())
+	defer direct.Close()
+	proxied := httptest.NewServer(api.ViaProxy(srv.Router())) // stands in for the Caddy Unix socket
+	defer proxied.Close()
+
+	post := func(base, path string, body map[string]string, hdr map[string]string) int {
+		raw, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPost, base+path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	good := map[string]string{"email": "pm@mulgyeol.cafe", "password": "password1234"}
+	bad := map[string]string{"email": "pm@mulgyeol.cafe", "password": "wrong-pass"}
+	if c := post(direct.URL, "/api/auth/setup", map[string]string{"setup_token": "tok", "email": good["email"], "password": good["password"]}, nil); c != http.StatusCreated {
+		t.Fatalf("setup: %d", c)
+	}
+
+	// Rotating spoofed IP headers must not reset the counter on a direct connection.
+	for i := 0; i < 5; i++ {
+		spoof := map[string]string{"X-Forwarded-For": fmt.Sprintf("9.9.9.%d", i), "True-Client-IP": fmt.Sprintf("8.8.8.%d", i)}
+		if c := post(direct.URL, "/api/auth/login", bad, spoof); c != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d", i+1, c)
+		}
+	}
+	if c := post(direct.URL, "/api/auth/login", good, nil); c != http.StatusTooManyRequests {
+		t.Fatalf("6th attempt (even correct) must be locked, got %d", c)
+	}
+
+	// Behind Caddy, the lock is per real client IP (Caddy's X-Forwarded-For).
+	for i := 0; i < 5; i++ {
+		post(proxied.URL, "/api/auth/login", bad, map[string]string{"X-Forwarded-For": "203.0.113.7"})
+	}
+	if c := post(proxied.URL, "/api/auth/login", good, map[string]string{"X-Forwarded-For": "203.0.113.7"}); c != http.StatusTooManyRequests {
+		t.Fatalf("proxied attacker IP should be locked, got %d", c)
+	}
+	if c := post(proxied.URL, "/api/auth/login", good, map[string]string{"X-Forwarded-For": "198.51.100.2"}); c != http.StatusOK {
+		t.Fatalf("a different real IP must still log in, got %d", c)
+	}
 }

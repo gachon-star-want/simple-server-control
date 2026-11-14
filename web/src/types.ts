@@ -91,6 +91,7 @@ export interface Service {
   active_container_name: string;
   active_image: string;
   volume_name: string;
+  data_path: string;
   pos_x: number;
   pos_y: number;
 }

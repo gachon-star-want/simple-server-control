@@ -24,6 +24,11 @@ const (
 	CaddyContainerName = "ssc-caddy"
 	// CaddyImage is the lightweight upstream Alpine Caddy image.
 	CaddyImage = "caddy:2-alpine"
+	// PanelSocketName is the Unix socket ssc serves the panel on for Caddy. It lives in
+	// <data>/caddy/config, which is already bind-mounted at /config in the Caddy container,
+	// so the panel needs no network listener reachable from containers or the internet.
+	PanelSocketName = "panel.sock"
+	panelDial       = "unix//config/" + PanelSocketName
 )
 
 // Router abstracts reverse proxy lifecycle and atomic multi-domain route syncing.
@@ -42,7 +47,6 @@ type CaddyRouter struct {
 	adminURL       string
 	ingressNetwork string
 	dataDir        string
-	listenPort     string
 	baseDomain     string
 	httpClient     *http.Client
 
@@ -51,13 +55,9 @@ type CaddyRouter struct {
 }
 
 // NewCaddyRouter constructs a Caddy Admin API client backed by SQLite routing state.
-func NewCaddyRouter(store *db.Store, engine docker.Engine, adminURL, ingressNetwork, dataDir, listenAddr, baseDomain string) *CaddyRouter {
+func NewCaddyRouter(store *db.Store, engine docker.Engine, adminURL, ingressNetwork, dataDir, baseDomain string) *CaddyRouter {
 	if adminURL == "" {
 		adminURL = "http://127.0.0.1:2019"
-	}
-	port := "8080"
-	if _, p, err := net.SplitHostPort(listenAddr); err == nil && p != "" {
-		port = p
 	}
 	return &CaddyRouter{
 		store:          store,
@@ -65,7 +65,6 @@ func NewCaddyRouter(store *db.Store, engine docker.Engine, adminURL, ingressNetw
 		adminURL:       strings.TrimRight(adminURL, "/"),
 		ingressNetwork: ingressNetwork,
 		dataDir:        dataDir,
-		listenPort:     port,
 		baseDomain:     strings.TrimSpace(baseDomain),
 		httpClient:     &http.Client{Timeout: 8 * time.Second},
 	}
@@ -162,7 +161,7 @@ func (c *CaddyRouter) Sync(ctx context.Context) error {
 		panelDomain = "ssc." + c.baseDomain
 	}
 
-	cfg := BuildCaddyConfig(targets, panelDomain, c.listenPort)
+	cfg := BuildCaddyConfig(targets, panelDomain)
 	body, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal caddy config: %w", err)
@@ -188,16 +187,16 @@ func (c *CaddyRouter) Sync(ctx context.Context) error {
 }
 
 // BuildCaddyConfig builds a clean Caddy v2 JSON structure supporting multi-domain HTTPS & HTTP fallback.
-func BuildCaddyConfig(targets []db.RouteTarget, panelDomain, panelPort string) map[string]any {
+func BuildCaddyConfig(targets []db.RouteTarget, panelDomain string) map[string]any {
 	routes := make([]map[string]any, 0, len(targets)+1)
 	var skipAutoHTTPS []string
 
-	if panelDomain = strings.TrimSpace(panelDomain); panelDomain != "" && panelPort != "" {
+	if panelDomain = strings.TrimSpace(panelDomain); panelDomain != "" {
 		routes = append(routes, map[string]any{
 			"match": []map[string]any{{"host": []string{panelDomain}}},
 			"handle": []map[string]any{{
 				"handler":   "reverse_proxy",
-				"upstreams": []map[string]any{{"dial": "host.docker.internal:" + panelPort}},
+				"upstreams": []map[string]any{{"dial": panelDial}},
 			}},
 			"terminal": true,
 		})
@@ -292,6 +291,10 @@ func (c *CaddyRouter) VerifyDNS(ctx context.Context, hostname string) (bool, []s
 	if err != nil {
 		return false, nil, serverIP, fmt.Sprintf("도메인 DNS 조회에 실패했습니다: %v (도메인 관리 화면에서 A 레코드가 서버 IP %s 를 가리키는지 확인해 주세요)", err, serverIP)
 	}
+	if len(ips) > 0 && allCloudflare(ips) {
+		// Orange cloud hides the origin IP, so the A-record comparison below can never match.
+		return true, ips, serverIP, fmt.Sprintf("Cloudflare 프록시(주황 구름)를 거쳐 연결된 도메인입니다. Cloudflare DNS의 A 레코드가 이 서버 IP(%s)인지 직접 확인해 주세요. %s", serverIP, CloudflareGuideKo)
+	}
 	if serverIP == "" {
 		return len(ips) > 0, ips, serverIP, "도메인은 조회되었으나 서버 공인 IP를 자동 감지할 수 없습니다."
 	}
@@ -301,6 +304,15 @@ func (c *CaddyRouter) VerifyDNS(ctx context.Context, hostname string) (bool, []s
 		}
 	}
 	return false, ips, serverIP, fmt.Sprintf("도메인이 다른 IP(%s)를 가리키고 있습니다. DNS A 레코드를 이 서버 IP(%s)로 변경해 주세요.", strings.Join(ips, ", "), serverIP)
+}
+
+func allCloudflare(ips []string) bool {
+	for _, ip := range ips {
+		if !IsCloudflareIP(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // PublicIP detects the server's public IPv4 address (cached once resolved) or falls back to local non-loopback IP.

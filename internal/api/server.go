@@ -80,6 +80,7 @@ type Server struct {
 	hub              *CanvasHub
 	uiFS             fs.FS
 	onUpgradeRestart func()
+	logins           *loginLimiter
 }
 
 // SetRestartCallback registers an optional hook invoked shortly after an in-panel upgrade completes.
@@ -110,6 +111,7 @@ func NewServer(
 		ghClient: ghClient,
 		hub:      hub,
 		uiFS:     uiFS,
+		logins:   newLoginLimiter(),
 	}
 }
 

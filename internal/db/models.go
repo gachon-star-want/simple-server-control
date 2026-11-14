@@ -96,6 +96,7 @@ type Service struct {
 	ActiveContainerName string    `json:"active_container_name"`
 	ActiveImage         string    `json:"active_image"`
 	VolumeName         string    `json:"volume_name"`
+	DataPath           string    `json:"data_path"` // app persistent folder; empty = stateless
 	PosX               float64   `json:"pos_x"`
 	PosY               float64   `json:"pos_y"`
 	CreatedAt          time.Time `json:"created_at"`
